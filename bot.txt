@@ -1,0 +1,75 @@
+from flask import Flask, request, abort
+from linebot import (LineBotApi, WebhookHandler)
+from linebot.exceptions import (InvalidSignatureError)
+from linebot.models import (MessageEvent, TextMessage, TextSendMessage, ImageSendMessage)
+import requests
+import json
+
+app = Flask(__name__)
+
+#url = "http://it-technocom.com/testproject/json.php"
+url = "http://ppshop.ga/json/json.php"
+
+line_bot_api = LineBotApi('++yuCzeHSH/uhWjdpv1LTWIiLypDtPZ/RdFddObhwFmbG7mhXyfxNuYDi2dgkZ03e2Z+w2BKS6eiyfbP/1mXtnVvttHxVvNbbjuXZ23vPWQ1eoAjfEXco3Am/ClBAB4k/lQS4kqPszKEIvmgCHjx+QdB04t89/1O/w1cDnyilFU=')
+handler = WebhookHandler('704083947f533f957f79268f947e6607')
+
+@app.route("/")
+def hello():
+    return "Hello World!"
+
+# @app.route("/webhook", methods=['POST'])
+# def webhook():
+#     if request.method == 'POST':
+#         return 'OK'
+@app.route("/webhook", methods=['POST'])
+def webhook():
+    # get X-Line-Signature header value
+    signature = request.headers['X-Line-Signature']
+
+    # get request body as text
+    body = request.get_data(as_text=True)
+    app.logger.info("Request body: " + body)
+
+    # handle webhook body
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+
+    return 'OK'
+    
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    reply = ''
+
+    data = {
+        'question': event.message.text
+    }
+    resp = requests.post(url, data)
+    if resp.status_code == 200:
+        response = json.loads(resp.text)
+    reply = str(response['answer'])
+    # if 'สวัสดี' in event.message.text:
+    #     reply = 'สวัสดค่ะ สนใจชุดแบบไหน'
+    # if 'สนใจ' in event.message.text:
+    #     reply = 'แคปรูปแจ้งขนาดไซต์สีมาได้เลยค่ะ'
+    # if 'ราคา' in event.message.text:
+    #     reply = 'สักครู่นะคะทางจะเช็คสินค้าให้นะคะ'
+    # if 'มีขนาดไซต์' in event.message.text:
+    #     reply = ' S อก 31-32 เอว 25-26 \n M อก 33-34 เอว 27-28 \n L 35-36 เอว 29-30 \n XL อก 37-38 เอว 31-32'
+    
+    if reply.startswith('$'):
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply.replace('$', '')))
+    else:
+        line_bot_api.reply_message(
+            event.reply_token, 
+            ImageSendMessage(
+                original_content_url=reply,
+                preview_image_url=reply
+            )
+        )
+
+
+if __name__ == "__main__":
+    app.run()
