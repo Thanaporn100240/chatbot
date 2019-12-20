@@ -1,0 +1,216 @@
+import deepcut
+
+from keras.models import Model
+from keras.layers import Input, LSTM, Dense, Embedding, TimeDistributed
+from keras.utils import to_categorical
+from gensim.models import Word2Vec
+import mysql.connector
+import difflib
+import numpy as np
+import traceback
+
+hostname = 'https://auth-db178.hostinger.com'
+username = 'u120459524_chatbot'
+password = 'qwerty@123'
+database = 'u120459524_chatbot'
+
+wv_model = Word2Vec.load("wiki.th.text.model")
+EMBEDDING_DIM = 10
+encoded_length = 10
+n_in = 1
+n_out = 1
+
+def connectMySQL():
+    myConnection = None
+    try:
+        myConnection = mysql.connector.connect(
+            user=username, 
+            password=password,
+            database=database,
+            host=hostname,
+        )
+        print('Connect to mysql success')
+    except Exception as e:
+        print('Cannot connect to mysql')
+        traceback.print_exc()
+    return myConnection
+
+def load_data(datafile):
+    # cnx = connectMySQL()
+    # cursor = cnx.cursor()
+    # query = (
+    #     "SELECT * FROM tb_answer" 
+    # )
+    # cursor.execute(query)
+    # print(cursor)
+    dataX = [
+        'ชื่ออะไรอ่ะ',
+        'อายุเท่าไหร่',
+        'คุณคือใคร',
+        'ใครเป็นคนสอนเธอ',
+        'กินข้าวรึยัง',
+        'ทำอะไรอยู่',
+        'ทำอะไรได้บ้าง'
+    ]
+    dataY = [
+        'ผมชื่อนิวคับ',
+        '11 ปี ครับ',
+        'นิวครับ',
+        'คุณแม่ครับ',
+        'กินแล้วครับ',
+        'อ่านหนังสืออยู่ครับ',
+        'ทำได้ทุกอย่างครับ'
+    ]
+    # data = open(datafile, "r").read().lower()
+    # for i in data.split("\n\n"):
+    #     a = i.split("\n")
+    #     question = a[0]
+    #     answer = a[1]
+    #     dataX.append(question)
+    #     dataY.append(answer)
+    return dataX,dataY
+
+def preparingword(listword):
+    word =[]
+    for w in listword:
+        word.append(wordcut(w))
+    return word
+
+def wordcut(sentence):
+    return deepcut.tokenize(sentence)
+
+def padding_sequence(listsentence,maxseq):
+    dataset = []
+    for s in listsentence:
+        n = maxseq - len(s)
+        if n>0:
+            dataset.append(s+(["<EOS>"]*n))
+        elif n<0:
+            dataset.append(s[0:maxseq])
+        else:
+            dataset.append(s)
+    return dataset
+
+def word_index(listword):
+    dataset = []
+    for sentence in listword:
+        tmp = []
+        for w in sentence:
+            tmp.append(word2idx(w))
+        dataset.append(tmp)
+    return np.array(dataset)
+    
+def word2idx(word):
+    index = 0
+    try:
+        index = wv_model.wv.vocab[word].index
+    except:
+        try:
+            sim = similar_word(word)
+            index = wv_model.wv.vocab[sim].index
+        except:
+            # index = wv_model.wv.vocab["<NONE>"].index
+            index = wv_model.wv.vocab["alt"].index
+    return index
+    
+def similar_word(word):
+    # sim_word = difflib.get_close_matches(word, word_list)
+    try:
+        sim_word = wv_model.most_similar(word)
+        return sim_word[0]
+    except:
+        return "<NONE>"
+
+
+def embedding_model():
+    vocab_list = [(k, wv_model.wv[k]) for k, v in wv_model.wv.vocab.items()]
+    embeddings_matrix = np.zeros((len(wv_model.wv.vocab.items()) + 1, wv_model.vector_size))
+    for i in range(len(vocab_list)):
+        word = vocab_list[i][0]
+        embeddings_matrix[i + 1] = vocab_list[i][1]
+
+    embedding_layer = Embedding(input_dim=len(embeddings_matrix),
+                                output_dim=EMBEDDING_DIM,
+                                weights=[embeddings_matrix],
+                                trainable=False,name="Embedding")
+    return embedding_layer,len(embeddings_matrix)
+
+def ende_embedding_model(n_input, n_output, n_units):
+    encoder_inputs = Input(shape=(None,), name="Encoder_input")
+
+    encoder = LSTM(n_units,return_state=True, name='Encoder_lstm')
+    Shared_Embedding,vocab_size = embedding_model()
+    word_embedding_context = Shared_Embedding(encoder_inputs)
+    encoder_outputs, state_h, state_c = encoder(word_embedding_context)
+    encoder_states = [state_h, state_c]
+
+    decoder_inputs = Input(shape=(None,), name="Decoder_input")
+    decoder_lstm = LSTM(n_units, return_sequences=True, return_state=True, name="Decoder_lstm")
+    word_embedding_answer = Shared_Embedding(decoder_inputs)
+    decoder_outputs, _, _ = decoder_lstm(word_embedding_answer, initial_state=encoder_states)
+    decoder_dense = TimeDistributed(Dense(vocab_size, activation='softmax', name="Dense_layer"))
+    decoder_outputs = decoder_dense(decoder_outputs)
+    model = Model([encoder_inputs, decoder_inputs], decoder_outputs)
+
+    encoder_model = Model(encoder_inputs, encoder_states)
+    decoder_state_input_h = Input(shape=(n_units,), name="H_state_input")
+    decoder_state_input_c = Input(shape=(n_units,), name="C_state_input")
+    decoder_states_inputs = [decoder_state_input_h, decoder_state_input_c]
+    decoder_outputs, state_h, state_c = decoder_lstm(word_embedding_answer, initial_state=decoder_states_inputs)
+    decoder_states = [state_h, state_c]
+    decoder_outputs = decoder_dense(decoder_outputs)
+    decoder_model = Model([decoder_inputs] + decoder_states_inputs, [decoder_outputs] + decoder_states)
+    return model, encoder_model, decoder_model
+
+def train_data():
+    data = "corpus.th.csv"
+    dataX = []
+    dataY = []
+    X1 = []
+    X2 = []
+    Y = []
+    vecsize = encoded_length
+
+    dataX,dataY = load_data(data)
+    dataX = preparingword(dataX)
+    dataY = preparingword(dataY)
+
+    for sentence in dataX:
+        X1.append(sentence)
+    for sentence in dataY:
+        Y.append(sentence)
+    for sentence in dataY:
+        X2.append(["_"]+sentence[0:len(sentence)-1])
+
+    X1 = padding_sequence(X1, n_in)
+    X2 = padding_sequence(X2, n_out)
+    Y = padding_sequence(Y, n_out)
+
+    X1 = word_index(X1)
+    X2 = word_index(X2)
+    Y = word_index(Y)
+    max_word = len(wv_model.wv.vocab)
+    Y = to_categorical(Y, num_classes=max_word)
+    
+    # define model
+    train, infenc, infdec = ende_embedding_model(n_in,n_out,256)
+    train.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['acc'])
+
+    print(train.summary())
+    # train model
+    train.fit([X1, X2], Y, epochs=600)
+
+    # saving model
+    infenc.save_weights("model_enc_weight.h5")
+    infenc.save("model_enc.h5")
+    print("Saved model to disk")
+    infdec.save_weights("model_dec_weight.h5")
+    infenc.save("model_dec.h5")
+    print("Saved model to disk")
+
+
+if __name__ == "__main__":
+    train_data()
+    pass
+
+
